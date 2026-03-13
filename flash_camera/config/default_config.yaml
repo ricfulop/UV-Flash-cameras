@@ -1,0 +1,50 @@
+# ── Camera Identity ──────────────────────────────────────────────
+cameras:
+  allied_vision:
+    serial: "ALLIED_VISION_SERIAL_HERE"
+    role: overview
+    default_pixel_format: Mono12
+    default_exposure_us: 500
+    default_gain_db: 0.0
+    lens: "78mm f/3.8"
+    working_distance_mm: 600
+    fov_mm: [52, 52]
+  basler:
+    serial: "BASLER_SERIAL_HERE"
+    role: closeup_filtered
+    default_pixel_format: Mono12
+    default_exposure_us: 200
+    default_gain_db: 0.0
+    default_filter: "no_filter"
+    lens: "25mm f/2.8"
+    working_distance_mm: 20
+    fov_mm: [54, 54]
+
+# ── Recording ────────────────────────────────────────────────────
+recording:
+  data_root: "D:/flash_data"
+  session_naming: "{date}_{time}_{name}"
+  pretrigger_buffer_s: 2.0
+  default_quality_preset: "high"
+  tiff_format: single_files
+  h265_crf: 20
+  h265_downscale: 1080
+
+  custom_quality:
+    bit_depth: Mono12
+    max_fps: 30
+    tiff_compression: lzw
+
+# ── ZeroMQ IPC ───────────────────────────────────────────────────
+zmq:
+  oes_pub_port: 5555
+  camera_pub_port: 5556
+  heartbeat_interval_s: 1.0
+
+# ── Display ──────────────────────────────────────────────────────
+display:
+  target_fps: 15
+  default_colormap: gray
+  show_crosshair: true
+  show_scale_bar: true
+  show_histogram: true

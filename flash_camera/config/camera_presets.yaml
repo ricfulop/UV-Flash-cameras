@@ -1,0 +1,39 @@
+# Per-camera saved presets for quick recall
+presets:
+  alignment_wide:
+    camera: allied_vision
+    exposure_us: 1000
+    gain_db: 6.0
+    pixel_format: Mono8
+    description: "Bright alignment mode for overview camera"
+
+  alignment_close:
+    camera: basler
+    exposure_us: 500
+    gain_db: 6.0
+    pixel_format: Mono8
+    description: "Bright alignment mode for close-up camera"
+
+  uv_imaging:
+    camera: basler
+    exposure_us: 200
+    gain_db: 0.0
+    pixel_format: Mono12
+    filter: uv_shortpass
+    description: "UV shortpass filter, full dynamic range"
+
+  argon_811:
+    camera: basler
+    exposure_us: 200
+    gain_db: 0.0
+    pixel_format: Mono12
+    filter: 810nm_ArI
+    description: "810nm Ar I narrow-band filter"
+
+  argon_780:
+    camera: basler
+    exposure_us: 200
+    gain_db: 0.0
+    pixel_format: Mono12
+    filter: 780nm
+    description: "780nm Ar II / OH narrow-band filter"
