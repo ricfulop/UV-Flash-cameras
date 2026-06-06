@@ -4,7 +4,7 @@
 
 Build a Python application for simultaneous acquisition, live preview, and recording from two USB3 UV-sensitive cameras (Sony IMX478 sensor, 200 nm–Vis, 8 MP) used in a plasma flash reduction reactor. The cameras have **different SDKs** and **different optical configurations**, and the software must handle both seamlessly within a unified interface.
 
-> **Target environment:** Desktop Python app (Windows primary, macOS secondary). Cursor IDE / VS Code development.
+> **Target environment:** Desktop Python app (Windows primary, macOS secondary). VS Code development.
 
 ---
 
