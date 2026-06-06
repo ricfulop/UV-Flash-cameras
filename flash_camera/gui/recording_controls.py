@@ -161,15 +161,10 @@ class RecordingControls(QWidget):
     # --- frame counters -------------------------------------------------------
 
     def _build_frame_counters(self, layout: QVBoxLayout) -> None:
-        row = QHBoxLayout()
-        self._av_frames = QLabel("AV: 0 frames")
-        self._av_frames.setStyleSheet("color: #4a90d9;")
-        self._basler_frames = QLabel("Basler: 0 frames")
-        self._basler_frames.setStyleSheet("color: #4a90d9;")
-        row.addWidget(self._av_frames)
-        row.addWidget(self._basler_frames)
-        row.addStretch()
-        layout.addLayout(row)
+        self._frame_counter_row = QHBoxLayout()
+        self._frame_counter_labels: dict[str, QLabel] = {}
+        self._frame_counter_row.addStretch()
+        layout.addLayout(self._frame_counter_row)
 
     # --- encoding progress ----------------------------------------------------
 
@@ -253,10 +248,15 @@ class RecordingControls(QWidget):
         self._timer_label.setText(f"{mins:02d}:{secs:04.1f}")
 
     def set_frame_counts(self, counts: dict) -> None:
-        av = counts.get("allied_vision", 0)
-        basler = counts.get("basler", 0)
-        self._av_frames.setText(f"AV: {av} frames")
-        self._basler_frames.setText(f"Basler: {basler} frames")
+        for cam_id, count in counts.items():
+            if cam_id not in self._frame_counter_labels:
+                lbl = QLabel(f"{cam_id}: {count} frames")
+                lbl.setStyleSheet("color: #4a90d9;")
+                self._frame_counter_labels[cam_id] = lbl
+                idx = self._frame_counter_row.count() - 1
+                self._frame_counter_row.insertWidget(max(0, idx), lbl)
+            else:
+                self._frame_counter_labels[cam_id].setText(f"{cam_id}: {count} frames")
 
     def add_encoding_job(self, session_id: str) -> QProgressBar:
         self._enc_title.setVisible(True)

@@ -4,7 +4,51 @@ import numpy as np
 import pytest
 
 from flash_camera.core.camera_interface import CameraInterface, FrameMetadata
+from flash_camera.core.camera_manager import CameraManager, CameraSlot
 from flash_camera.core.simulated_camera import SimulatedCamera
+
+
+def test_vimbax_connect_uses_device_id(monkeypatch):
+    calls = {}
+
+    class FakeAlliedVisionCamera:
+        def __init__(self, device_id=None):
+            calls["device_id"] = device_id
+
+        def open(self):
+            calls["opened"] = True
+
+        def get_pixel_formats(self):
+            return []
+
+        def set_exposure(self, us):
+            calls["exposure_us"] = us
+
+        def set_gain(self, db):
+            calls["gain_db"] = db
+
+    import flash_camera.core.allied_vision_camera as allied_module
+
+    monkeypatch.setattr(allied_module, "AlliedVisionCamera", FakeAlliedVisionCamera)
+
+    manager = CameraManager(config={})
+    slot = CameraSlot(
+        camera_id="allied_vision",
+        role="overview",
+        sdk="vimbax",
+        config={},
+    )
+
+    manager._connect_hardware(
+        slot,
+        hw_dev={"sdk": "vimbax", "serial": "DEV_123"},
+        cfg={"default_exposure_us": 500, "default_gain_db": 0.0},
+    )
+
+    assert calls["device_id"] == "DEV_123"
+    assert calls["opened"] is True
+    assert slot.connected is True
+    assert slot.camera is not None
 
 
 class TestSimulatedCamera:

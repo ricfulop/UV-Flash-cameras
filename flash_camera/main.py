@@ -1,4 +1,4 @@
-"""Flash Camera — Dual UV Imaging System entry point."""
+"""Flash Camera — Multi-Camera Imaging System entry point."""
 
 import argparse
 import logging
@@ -29,7 +29,7 @@ def _setup_logging(verbose: bool = False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Flash Camera Dual UV Imaging System")
+    parser = argparse.ArgumentParser(description="Flash Camera Multi-Camera Imaging System")
     parser.add_argument(
         "--config", "-c", type=str, default=None,
         help="Path to YAML config file",
@@ -45,6 +45,9 @@ def main():
     args = parser.parse_args()
 
     _setup_logging(verbose=args.verbose)
+    logger = logging.getLogger(__name__)
+    logger.info("Platform: %s (%s)", sys.platform, os.uname().machine if hasattr(os, "uname") else "unknown")
+
     config = _load_config(args.config)
 
     app = QApplication(sys.argv)

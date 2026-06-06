@@ -14,6 +14,38 @@ presets:
     pixel_format: Mono8
     description: "Bright alignment mode for close-up camera"
 
+  dilatometer_470_front:
+    camera: basler
+    exposure_us: 200
+    gain_db: 0.0
+    pixel_format: Mono12
+    filter: 470nm_bandpass
+    illumination_nm: 470
+    illumination_geometry: strobed_backlight
+    lens: "0.16X SilverTL-class telecentric"
+    description: "Front x-z silhouette view for 3D wire dilatometer"
+
+  dilatometer_470_top:
+    camera: allied_vision
+    exposure_us: 200
+    gain_db: 0.0
+    pixel_format: Mono12
+    filter: 470nm_bandpass
+    illumination_nm: 470
+    illumination_geometry: strobed_backlight
+    lens: "0.16X SilverTL-class telecentric"
+    description: "Top x-y silhouette view for 3D wire dilatometer"
+
+  dilatometer_focus_sweep:
+    camera_pair: [basler, allied_vision]
+    exposure_us: 200
+    gain_db: 0.0
+    pixel_format: Mono12
+    filter: 470nm_bandpass
+    illumination_nm: 470
+    defocus_offsets_mm: [-20, -10, -5, 0, 5, 10, 20]
+    description: "Gauge pin focus/edge-sharpness sweep for dilatometer QC"
+
   uv_imaging:
     camera: basler
     exposure_us: 200

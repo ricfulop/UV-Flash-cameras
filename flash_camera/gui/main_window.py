@@ -1,22 +1,26 @@
-"""Top-level application window with dual viewports and unified controls."""
+"""Top-level application window with dynamic N-camera viewports."""
 
 import logging
+import math
 import os
 import sys
 import time
 from functools import partial
 from pathlib import Path
 
+import cv2
 import numpy as np
 import yaml
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QObject
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QAction, QKeySequence, QPalette, QColor, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QVBoxLayout,
@@ -32,6 +36,7 @@ from flash_camera.core.quality_presets import (
 )
 from flash_camera.core.recorder import RecordingSession, H265Encoder
 from flash_camera.core.ipc_bus import IPCBus
+from flash_camera.core.dilatometer_config import build_dilatometer_metadata
 from flash_camera.utils.timestamp import (
     get_utc_timestamp,
     TimestampSynchronizer,
@@ -76,11 +81,6 @@ QStatusBar {
 """
 
 
-class FrameDispatcher(QObject):
-    """Receives frames from acquisition threads and dispatches to GUI on main thread."""
-    frame_ready = pyqtSignal(str, object, object)
-
-
 class MainWindow(QMainWindow):
 
     def __init__(self, config: dict, use_simulated: bool = False):
@@ -95,10 +95,12 @@ class MainWindow(QMainWindow):
         self._oes_sync_data: dict = {}
 
         self._timestamp_sync = TimestampSynchronizer()
-        self._frame_dispatcher = FrameDispatcher(self)
-        self._frame_dispatcher.frame_ready.connect(self._on_frame_from_camera)
 
-        self.setWindowTitle("Flash Camera — Dual UV Imaging")
+        self._viewports: dict[str, dict] = {}
+        self._pending_frames: dict[str, tuple] = {}
+        self._pending_lock = __import__("threading").Lock()
+
+        self.setWindowTitle("Flash Camera — Multi-Camera Imaging")
         self.setMinimumSize(1200, 800)
         self.resize(1600, 1000)
         self.setStyleSheet(DARK_STYLE)
@@ -109,7 +111,6 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._setup_shortcuts()
         self._setup_timers()
-
         self._start_cameras()
 
     def _init_camera_manager(self):
@@ -118,11 +119,10 @@ class MainWindow(QMainWindow):
         logger.info("Cameras discovered: %s", found)
 
         rec_cfg = self._config.get("recording", {})
-        bit_depth = "Mono12"
         self._cam_mgr.init_ring_buffers(
             duration_s=rec_cfg.get("pretrigger_buffer_s", 2.0),
             max_fps=30.0,
-            bit_depth=bit_depth,
+            bit_depth="Mono12",
         )
 
         for slot in self._cam_mgr.slots.values():
@@ -143,6 +143,8 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to start IPC bus — running without OES integration")
             self._ipc = None
 
+    # ── UI Construction ────────────────────────────────────────
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -151,17 +153,7 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(4)
 
         self._build_top_bar(main_layout)
-
-        body_splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        self._av_viewport = self._build_camera_viewport("allied_vision", "overview")
-        self._basler_viewport = self._build_camera_viewport("basler", "closeup_filtered")
-
-        body_splitter.addWidget(self._av_viewport["container"])
-        body_splitter.addWidget(self._basler_viewport["container"])
-        body_splitter.setSizes([500, 500])
-        main_layout.addWidget(body_splitter, stretch=1)
-
+        self._build_camera_grid(main_layout)
         self._build_bottom_bar(main_layout)
 
     def _build_top_bar(self, parent_layout):
@@ -171,6 +163,11 @@ class MainWindow(QMainWindow):
         title = QLabel("Flash Camera")
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #4a90d9;")
         bar.addWidget(title)
+
+        cam_count = len(self._cam_mgr.get_connected_ids())
+        self._cam_count_label = QLabel(f"{cam_count} camera(s)")
+        self._cam_count_label.setStyleSheet("color: #888888; font-size: 12px;")
+        bar.addWidget(self._cam_count_label)
 
         self._oes_indicator = QLabel("● OES Disconnected")
         self._oes_indicator.setStyleSheet("color: #ff4444; font-size: 12px;")
@@ -183,28 +180,95 @@ class MainWindow(QMainWindow):
 
         parent_layout.addLayout(bar)
 
-    def _build_camera_viewport(self, camera_id: str, role: str) -> dict:
+    def _build_camera_grid(self, parent_layout):
+        """Build a responsive grid of camera viewports based on how many are connected."""
+        connected = self._cam_mgr.get_connected_ids()
+        n = len(connected)
+
+        if n == 0:
+            empty = QWidget()
+            empty_layout = QVBoxLayout(empty)
+            empty_layout.addStretch()
+            msg = QLabel("No cameras detected")
+            msg.setStyleSheet("font-size: 20px; font-weight: bold; color: #666666;")
+            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_layout.addWidget(msg)
+            hint = QLabel(
+                "Connect USB cameras and click Rescan, or relaunch with --simulated for testing.\n\n"
+                "Supported: Allied Vision (Vimba X) · Basler (Pylon) · USB Microscope (UVC) · Optris Thermal"
+            )
+            hint.setStyleSheet("font-size: 12px; color: #555555;")
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint.setWordWrap(True)
+            empty_layout.addWidget(hint)
+            rescan_btn = QPushButton("Rescan for Cameras")
+            rescan_btn.setFixedWidth(200)
+            rescan_btn.setStyleSheet(
+                "QPushButton { background-color: #4a90d9; color: white; font-weight: bold; "
+                "padding: 8px 16px; border-radius: 4px; font-size: 13px; }"
+                "QPushButton:hover { background-color: #5aa0e9; }"
+            )
+            rescan_btn.clicked.connect(self._rescan_cameras)
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            btn_row.addWidget(rescan_btn)
+            btn_row.addStretch()
+            empty_layout.addLayout(btn_row)
+            empty_layout.addStretch()
+            parent_layout.addWidget(empty, stretch=1)
+            return
+
+        if n == 1:
+            cols = 1
+        elif n <= 2:
+            cols = 2
+        elif n <= 4:
+            cols = 2
+        else:
+            cols = 3
+
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(2, 2, 2, 2)
+        grid.setSpacing(4)
+
+        for i, cam_id in enumerate(connected):
+            slot = self._cam_mgr.slots[cam_id]
+            row, col = divmod(i, cols)
+            vp = self._build_camera_viewport(cam_id, slot.role, slot.sdk)
+            self._viewports[cam_id] = vp
+            grid.addWidget(vp["container"], row, col)
+
+        parent_layout.addWidget(grid_widget, stretch=1)
+
+    def _build_camera_viewport(self, camera_id: str, role: str, sdk: str) -> dict:
         container = QWidget()
+        container.setStyleSheet("QWidget { border: 1px solid #2a2a2a; border-radius: 3px; }")
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(2)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(1)
 
         live_view = LiveViewWidget()
+        live_view.setMinimumHeight(120)
         cam_cfg = self._config.get("cameras", {}).get(camera_id, {})
         fov = cam_cfg.get("fov_mm")
         if fov:
             live_view.set_fov_mm(tuple(fov))
-        layout.addWidget(live_view, stretch=1)
+        layout.addWidget(live_view, stretch=4)
 
         histogram = HistogramWidget()
+        histogram.setFixedHeight(60)
         layout.addWidget(histogram)
 
         controls_row = QHBoxLayout()
+        controls_row.setSpacing(1)
+        controls_row.setContentsMargins(0, 0, 0, 0)
         panel = CameraPanel(camera_id, role)
+        panel.setMaximumHeight(120)
         controls_row.addWidget(panel)
 
         filter_sel = None
-        if camera_id == "basler":
+        if role == "closeup_filtered":
             filter_sel = FilterSelector()
             default_filter = cam_cfg.get("default_filter", "no_filter")
             filter_sel.set_filter(default_filter)
@@ -213,22 +277,20 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls_row)
 
         slot = self._cam_mgr.slots.get(camera_id)
-        if slot and slot.connected:
+        if slot and slot.connected and slot.camera is not None:
             panel.set_connected(True)
             cam = slot.camera
-            if cam is not None:
-                try:
-                    panel.set_exposure_range(*cam.get_exposure_range())
-                    panel.set_gain_range(*cam.get_gain_range())
-                    panel.set_pixel_formats(cam.get_pixel_formats())
-                    cfg = self._config.get("cameras", {}).get(camera_id, {})
-                    panel.update_values(
-                        cfg.get("default_exposure_us", 500),
-                        cfg.get("default_gain_db", 0.0),
-                        cfg.get("default_pixel_format", "Mono8"),
-                    )
-                except Exception:
-                    logger.exception("Failed to initialize panel for %s", camera_id)
+            try:
+                panel.set_exposure_range(*cam.get_exposure_range())
+                panel.set_gain_range(*cam.get_gain_range())
+                panel.set_pixel_formats(cam.get_pixel_formats())
+                panel.update_values(
+                    cam_cfg.get("default_exposure_us", 500),
+                    cam_cfg.get("default_gain_db", 0.0),
+                    cam_cfg.get("default_pixel_format", "Mono8"),
+                )
+            except Exception:
+                logger.exception("Failed to initialize panel for %s", camera_id)
         else:
             panel.set_connected(False)
 
@@ -239,6 +301,8 @@ class MainWindow(QMainWindow):
             "panel": panel,
             "filter_selector": filter_sel,
             "camera_id": camera_id,
+            "role": role,
+            "sdk": sdk,
         }
 
     def _build_bottom_bar(self, parent_layout):
@@ -255,55 +319,45 @@ class MainWindow(QMainWindow):
 
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._status_bar.showMessage("Ready")
+        self._status_bar.showMessage(
+            f"Ready — {len(self._cam_mgr.get_connected_ids())} camera(s) connected"
+        )
+
+    # ── Signal Wiring ─────────────────────────────────────────
 
     def _connect_signals(self):
         self._recording_controls.record_start_requested.connect(self._start_recording)
         self._recording_controls.record_stop_requested.connect(self._stop_recording)
-
         self._quality_selector.preset_changed.connect(self._on_preset_changed)
 
         self._overlay_controls.crosshair_toggled.connect(
-            lambda v: (
-                self._av_viewport["live_view"].set_crosshair_visible(v),
-                self._basler_viewport["live_view"].set_crosshair_visible(v),
-            )
-        )
+            lambda v: self._broadcast_to_views("set_crosshair_visible", v))
         self._overlay_controls.scale_bar_toggled.connect(
-            lambda v: (
-                self._av_viewport["live_view"].set_scale_bar_visible(v),
-                self._basler_viewport["live_view"].set_scale_bar_visible(v),
-            )
-        )
+            lambda v: self._broadcast_to_views("set_scale_bar_visible", v))
         self._overlay_controls.info_toggled.connect(
-            lambda v: (
-                self._av_viewport["live_view"].set_info_visible(v),
-                self._basler_viewport["live_view"].set_info_visible(v),
-            )
-        )
+            lambda v: self._broadcast_to_views("set_info_visible", v))
         self._overlay_controls.colormap_changed.connect(
-            lambda v: (
-                self._av_viewport["live_view"].set_colormap(v),
-                self._basler_viewport["live_view"].set_colormap(v),
-            )
-        )
+            lambda v: self._broadcast_to_views("set_colormap", v))
 
-        for vp in (self._av_viewport, self._basler_viewport):
-            cam_id = vp["camera_id"]
+        for cam_id, vp in self._viewports.items():
             vp["panel"].exposure_changed.connect(partial(self._set_camera_exposure, cam_id))
             vp["panel"].gain_changed.connect(partial(self._set_camera_gain, cam_id))
             vp["panel"].pixel_format_changed.connect(partial(self._set_camera_pixel_format, cam_id))
             vp["panel"].roi_changed.connect(partial(self._set_camera_roi, cam_id))
             vp["panel"].rescan_requested.connect(self._rescan_cameras)
 
-        fs = self._basler_viewport.get("filter_selector")
-        if fs:
-            fs.filter_changed.connect(self._on_filter_changed)
+            if vp.get("filter_selector"):
+                vp["filter_selector"].filter_changed.connect(
+                    partial(self._on_filter_changed, cam_id))
 
         if self._ipc is not None:
             self._ipc.record_start_received.connect(self._on_oes_record_start)
             self._ipc.record_stop_received.connect(self._on_oes_record_stop)
             self._ipc.heartbeat_timeout.connect(self._on_oes_timeout)
+
+    def _broadcast_to_views(self, method: str, value):
+        for vp in self._viewports.values():
+            getattr(vp["live_view"], method)(value)
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle_recording)
@@ -313,9 +367,13 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self._exit_fullscreen)
 
     def _setup_timers(self):
-        self._display_timer = QTimer(self)
-        self._display_timer.timeout.connect(self._update_display_stats)
-        self._display_timer.start(200)
+        self._frame_poll_timer = QTimer(self)
+        self._frame_poll_timer.timeout.connect(self._poll_display_frames)
+        self._frame_poll_timer.start(67)  # ~15 fps display refresh
+
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self._update_display_stats)
+        self._stats_timer.start(500)
 
         self._record_timer = QTimer(self)
         self._record_timer.timeout.connect(self._update_recording_stats)
@@ -329,32 +387,59 @@ class MainWindow(QMainWindow):
         if self._ipc is not None:
             self._ipc.set_status(cameras_connected=connected)
 
-    # ── Frame handling ──────────────────────────────────────────
+    # ── Frame Handling ────────────────────────────────────────
 
     def _frame_callback(self, camera_id: str, frame: np.ndarray, meta):
-        """Called from acquisition thread — dispatch to main thread via signal."""
-        self._frame_dispatcher.frame_ready.emit(camera_id, frame, meta)
-
+        """Called from acquisition thread. Store latest frame for GUI polling.
+        Recording writes happen here at full rate; display is throttled."""
         if self._recording and self._recording_session is not None:
             self._recording_session.write_frame(camera_id, frame, meta)
 
-    @pyqtSlot(str, object, object)
-    def _on_frame_from_camera(self, camera_id: str, frame: np.ndarray, meta):
-        """Handle frame on the main GUI thread."""
-        vp = self._av_viewport if camera_id == "allied_vision" else self._basler_viewport
+        with self._pending_lock:
+            self._pending_frames[camera_id] = (frame, meta)
 
-        meta_dict = {
-            "exposure_us": meta.exposure_us,
-            "gain_db": meta.gain_db,
-            "pixel_format": meta.pixel_format,
-            "frame_counter": meta.frame_id,
-        }
-        vp["live_view"].update_frame(frame, meta_dict)
-        vp["histogram"].update_histogram(frame)
+    def _poll_display_frames(self):
+        """Called by display timer (~15fps) on the GUI thread. Safe and throttled."""
+        with self._pending_lock:
+            pending = dict(self._pending_frames)
+            self._pending_frames.clear()
 
-    # ── Camera controls ────────────────────────────────────────
+        for camera_id, (frame, meta) in pending.items():
+            vp = self._viewports.get(camera_id)
+            if vp is None:
+                continue
+
+            display_frame = frame
+            h, w = frame.shape[:2]
+            max_display = 1080
+            if h > max_display or w > max_display:
+                scale = max_display / max(h, w)
+                new_w, new_h = int(w * scale), int(h * scale)
+                display_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            meta_dict = {
+                "exposure_us": meta.exposure_us,
+                "gain_db": meta.gain_db,
+                "pixel_format": meta.pixel_format,
+                "frame_counter": meta.frame_id,
+            }
+            vp["live_view"].update_frame(display_frame, meta_dict)
+            vp["histogram"].update_histogram(display_frame)
+
+    # ── Camera Controls (debounced) ──────────────────────────
 
     def _set_camera_exposure(self, camera_id: str, us: float):
+        key = f"_debounce_exp_{camera_id}"
+        timer = getattr(self, key, None)
+        if timer is not None:
+            timer.stop()
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(lambda: self._apply_exposure(camera_id, us))
+        t.start(50)
+        setattr(self, key, t)
+
+    def _apply_exposure(self, camera_id: str, us: float):
         slot = self._cam_mgr.slots.get(camera_id)
         if slot and slot.camera:
             try:
@@ -363,6 +448,17 @@ class MainWindow(QMainWindow):
                 logger.exception("Failed to set exposure on %s", camera_id)
 
     def _set_camera_gain(self, camera_id: str, db: float):
+        key = f"_debounce_gain_{camera_id}"
+        timer = getattr(self, key, None)
+        if timer is not None:
+            timer.stop()
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(lambda: self._apply_gain(camera_id, db))
+        t.start(50)
+        setattr(self, key, t)
+
+    def _apply_gain(self, camera_id: str, db: float):
         slot = self._cam_mgr.slots.get(camera_id)
         if slot and slot.camera:
             try:
@@ -380,7 +476,6 @@ class MainWindow(QMainWindow):
                 slot.camera.set_pixel_format(fmt)
                 if was_acquiring:
                     slot.start_acquisition()
-                self._quality_selector.preset_changed.emit("custom")
             except Exception:
                 logger.exception("Failed to set pixel format on %s", camera_id)
 
@@ -416,26 +511,23 @@ class MainWindow(QMainWindow):
                     slot.start_acquisition()
             except Exception:
                 logger.exception("Failed to apply preset to %s", cam_id)
-            vp = self._av_viewport if cam_id == "allied_vision" else self._basler_viewport
-            vp["panel"].update_values(
-                slot.camera.get_exposure_range()[0],
-                slot.camera.get_gain_range()[0],
-                preset.bit_depth,
-            )
 
-    def _on_filter_changed(self, filter_key: str):
-        label = _FILTER_LABELS.get(filter_key, "")
-        self._basler_viewport["live_view"].set_filter_label(label)
+    def _on_filter_changed(self, camera_id: str, filter_key: str):
+        vp = self._viewports.get(camera_id)
+        if vp:
+            label = _FILTER_LABELS.get(filter_key, "")
+            vp["live_view"].set_filter_label(label)
 
     def _rescan_cameras(self):
         self._cam_mgr.rescan()
-        for vp in (self._av_viewport, self._basler_viewport):
-            cam_id = vp["camera_id"]
+        for cam_id, vp in self._viewports.items():
             slot = self._cam_mgr.slots.get(cam_id)
             vp["panel"].set_connected(slot.connected if slot else False)
         self._start_cameras()
+        self._cam_count_label.setText(
+            f"{len(self._cam_mgr.get_connected_ids())} camera(s)")
 
-    # ── Recording ──────────────────────────────────────────────
+    # ── Recording ─────────────────────────────────────────────
 
     def _toggle_recording(self):
         if self._recording:
@@ -448,7 +540,7 @@ class MainWindow(QMainWindow):
             return
 
         rec_cfg = self._config.get("recording", {})
-        data_root = rec_cfg.get("data_root", "./flash_data")
+        data_root = self._resolve_data_root(rec_cfg.get("data_root", "auto"))
         session_name = self._recording_controls.get_session_name()
 
         preset_name = self._quality_selector.get_current_preset()
@@ -478,17 +570,15 @@ class MainWindow(QMainWindow):
 
         self._recording_controls.set_recording(True)
         self._quality_selector.set_locked(True)
-        self._av_viewport["live_view"].set_recording(True)
-        self._basler_viewport["live_view"].set_recording(True)
-        for vp in (self._av_viewport, self._basler_viewport):
+        for vp in self._viewports.values():
+            vp["live_view"].set_recording(True)
             vp["panel"].set_recording_mode(True)
 
         self._record_timer.start(100)
 
         if self._ipc is not None:
             self._ipc.publisher.publish_recording_state(
-                "started", session_name, {c: 0 for c in cameras}
-            )
+                "started", session_name, {c: 0 for c in cameras})
             self._ipc.set_status(is_recording=True)
 
         self._status_bar.showMessage(f"Recording: {session_name}")
@@ -505,7 +595,6 @@ class MainWindow(QMainWindow):
         if self._recording_session is not None:
             stats = self._recording_session.stop()
             session_dir = self._recording_session.session_dir
-
             self._save_session_metadata(session_dir, stats)
 
             try:
@@ -513,8 +602,7 @@ class MainWindow(QMainWindow):
                 for enc in encoders:
                     self._encoding_jobs.append(enc)
                     self._recording_controls.add_encoding_job(
-                        self._recording_session._session_name
-                    )
+                        self._recording_session._session_name)
                 if encoders:
                     self._encoding_timer.start(500)
             except Exception:
@@ -524,9 +612,8 @@ class MainWindow(QMainWindow):
 
         self._recording_controls.set_recording(False)
         self._quality_selector.set_locked(False)
-        self._av_viewport["live_view"].set_recording(False)
-        self._basler_viewport["live_view"].set_recording(False)
-        for vp in (self._av_viewport, self._basler_viewport):
+        for vp in self._viewports.values():
+            vp["live_view"].set_recording(False)
             vp["panel"].set_recording_mode(False)
 
         if self._ipc is not None:
@@ -534,10 +621,7 @@ class MainWindow(QMainWindow):
             for cam_id, cam_stats in stats.get("cameras", {}).items():
                 frame_counts[cam_id] = cam_stats.get("frames_written", 0)
             self._ipc.publisher.publish_recording_state(
-                "stopped",
-                stats.get("session_name", ""),
-                frame_counts,
-            )
+                "stopped", stats.get("session_name", ""), frame_counts)
             self._ipc.set_status(is_recording=False)
 
         self._status_bar.showMessage("Recording stopped")
@@ -552,31 +636,27 @@ class MainWindow(QMainWindow):
         quality = self._quality_selector.get_quality_settings()
         quality["preset"] = preset_name
         elapsed = stats.get("elapsed_s", 0.0)
-        total_bytes = 0
-        for cam_stats in stats.get("cameras", {}).values():
-            total_bytes += cam_stats.get("frames_written", 0) * 3840 * 2160 * 2
-        if elapsed > 0:
-            quality["actual_avg_write_mb_s"] = total_bytes / elapsed / (1024 * 1024)
 
         cameras_info = {}
         for cam_id, slot in self._cam_mgr.slots.items():
-            cam_data = {"frame_count": 0, "avg_fps": 0.0}
+            cam_data = {"frame_count": 0, "avg_fps": 0.0, "sdk": slot.sdk}
             cam_stats = stats.get("cameras", {}).get(cam_id, {})
             cam_data["frame_count"] = cam_stats.get("frames_written", 0)
             cam_data["avg_fps"] = cam_stats.get("write_rate_fps", 0.0)
             if slot.camera is not None:
                 try:
-                    info = slot.camera.get_camera_info()
-                    cam_data.update(info)
+                    cam_data.update(slot.camera.get_camera_info())
                 except Exception:
                     pass
             cam_cfg = self._config.get("cameras", {}).get(cam_id, {})
             cam_data["lens"] = cam_cfg.get("lens", "")
             cam_data["working_distance_mm"] = cam_cfg.get("working_distance_mm", 0)
             cam_data["fov_mm"] = cam_cfg.get("fov_mm", [])
-            if cam_id == "basler":
-                fs = self._basler_viewport.get("filter_selector")
-                cam_data["filter_installed"] = fs.get_current_filter() if fs else "no_filter"
+
+            vp = self._viewports.get(cam_id)
+            if vp and vp.get("filter_selector"):
+                cam_data["filter_installed"] = vp["filter_selector"].get_current_filter()
+
             cameras_info[cam_id] = cam_data
 
         reactor = create_default_reactor_conditions()
@@ -595,6 +675,11 @@ class MainWindow(QMainWindow):
             reactor_conditions=reactor,
             oes_sync=self._oes_sync_data if self._oes_sync_data else None,
             file_paths=file_paths,
+            dilatometer=build_dilatometer_metadata(
+                self._config,
+                connected_camera_ids=self._cam_mgr.get_connected_ids(),
+                cameras_info=cameras_info,
+            ),
             duration_s=elapsed,
         )
 
@@ -605,22 +690,29 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.exception("Failed to save metadata")
 
-    # ── Display updates ────────────────────────────────────────
+    @staticmethod
+    def _resolve_data_root(configured: str) -> str:
+        if configured and configured != "auto":
+            return configured
+        if sys.platform == "win32":
+            if Path("D:/").exists():
+                return "D:/flash_data"
+            return str(Path.home() / "flash_data")
+        return str(Path.home() / "flash_data")
+
+    # ── Display Updates ───────────────────────────────────────
 
     def _update_display_stats(self):
-        for vp in (self._av_viewport, self._basler_viewport):
-            cam_id = vp["camera_id"]
+        for cam_id, vp in self._viewports.items():
             slot = self._cam_mgr.slots.get(cam_id)
             if slot and slot.camera:
                 try:
-                    fps = slot.camera.get_frame_rate()
-                    vp["panel"].set_frame_rate(fps)
+                    vp["panel"].set_frame_rate(slot.camera.get_frame_rate())
                 except Exception:
                     pass
 
         if self._ipc is not None:
-            connected = self._ipc.is_oes_connected
-            if connected:
+            if self._ipc.is_oes_connected:
                 self._oes_indicator.setText("● OES Connected")
                 self._oes_indicator.setStyleSheet("color: #44cc44; font-size: 12px;")
             else:
@@ -641,12 +733,10 @@ class MainWindow(QMainWindow):
             self._recording_controls.set_frame_counts(frame_counts)
 
             total_queue = sum(
-                cs.get("queue_depth", 0) for cs in stats.get("cameras", {}).values()
-            )
+                cs.get("queue_depth", 0) for cs in stats.get("cameras", {}).values())
             if total_queue > 50:
                 self._recording_controls.show_warning(
-                    f"WRITE LAG: {total_queue} frames behind", "warning"
-                )
+                    f"WRITE LAG: {total_queue} frames behind", "warning")
             else:
                 self._recording_controls.clear_warnings()
 
@@ -654,16 +744,14 @@ class MainWindow(QMainWindow):
         all_done = True
         for i, enc in enumerate(self._encoding_jobs):
             progress = enc.get_progress() * 100
-            self._recording_controls.update_encoding_progress(
-                f"job_{i}", progress
-            )
+            self._recording_controls.update_encoding_progress(f"job_{i}", progress)
             if enc.is_running():
                 all_done = False
         if all_done and self._encoding_jobs:
             self._encoding_timer.stop()
             self._encoding_jobs.clear()
 
-    # ── IPC handlers ──────────────────────────────────────────
+    # ── IPC Handlers ──────────────────────────────────────────
 
     @pyqtSlot(dict)
     def _on_oes_record_start(self, payload: dict):
@@ -674,14 +762,12 @@ class MainWindow(QMainWindow):
             "sync_method": "zmq_start_message",
             "triggered_by": "oes_app",
         }
-
         session_id = payload.get("session_id", "")
         if session_id:
             self._recording_controls._session_edit.setText(session_id)
         notes = payload.get("notes", "")
         if notes:
             self._recording_controls.set_notes(notes)
-
         self._start_recording()
 
     @pyqtSlot(dict)
@@ -692,7 +778,7 @@ class MainWindow(QMainWindow):
         self._oes_indicator.setText("● OES Disconnected")
         self._oes_indicator.setStyleSheet("color: #ff4444; font-size: 12px;")
 
-    # ── Keyboard shortcuts ────────────────────────────────────
+    # ── Keyboard Shortcuts ────────────────────────────────────
 
     def _software_trigger(self):
         for slot in self._cam_mgr.slots.values():

@@ -1,8 +1,8 @@
-"""Basler filter logging widget."""
+"""Basler filter logging widget — compact layout."""
 
 import logging
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
@@ -18,18 +18,18 @@ STYLE = """
 QWidget {
     background-color: #1e1e1e;
     color: #cccccc;
-    font-size: 12px;
+    font-size: 11px;
 }
 QRadioButton {
-    spacing: 6px;
-    padding: 4px 6px;
-    border-radius: 3px;
+    spacing: 4px;
+    padding: 2px 4px;
+    font-size: 10px;
 }
 QRadioButton::indicator {
-    width: 14px;
-    height: 14px;
+    width: 10px;
+    height: 10px;
     border: 1px solid #3a3a3a;
-    border-radius: 7px;
+    border-radius: 5px;
     background-color: #2a2a2a;
 }
 QRadioButton::indicator:checked {
@@ -39,10 +39,10 @@ QRadioButton::indicator:checked {
 """
 
 _FILTERS = [
-    ("no_filter", "No Filter", None),
-    ("uv_shortpass", "UV Shortpass (≤400nm)", "#9b59b6"),
-    ("810nm_ArI", "810nm Ar I", "#e74c3c"),
-    ("780nm", "780nm Ar II/OH", "#8b0000"),
+    ("no_filter", "None", "#666666"),
+    ("uv_shortpass", "UV ≤400nm", "#9b59b6"),
+    ("810nm_ArI", "810nm ArI", "#e74c3c"),
+    ("780nm", "780nm", "#8b0000"),
 ]
 
 
@@ -52,28 +52,31 @@ class FilterSelector(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setStyleSheet(STYLE)
+        self.setMinimumWidth(100)
+        self.setMaximumWidth(130)
         self._buttons: dict[str, QRadioButton] = {}
         self._group = QButtonGroup(self)
         self._build_ui()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(4)
+        root.setContentsMargins(4, 2, 4, 2)
+        root.setSpacing(2)
 
         title = QLabel("FILTER")
-        title.setStyleSheet("font-size: 13px; font-weight: bold; color: #4a90d9;")
+        title.setStyleSheet("font-size: 10px; font-weight: bold; color: #4a90d9;")
         root.addWidget(title)
 
         for key, label, color in _FILTERS:
             row = QHBoxLayout()
-            row.setSpacing(6)
+            row.setSpacing(4)
+            row.setContentsMargins(0, 0, 0, 0)
 
-            if color:
-                dot = QLabel("●")
-                dot.setFixedWidth(16)
-                dot.setStyleSheet(f"color: {color}; font-size: 16px;")
-                row.addWidget(dot)
+            dot = QLabel("●")
+            dot.setFixedWidth(12)
+            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            dot.setStyleSheet(f"color: {color}; font-size: 10px;")
+            row.addWidget(dot)
 
             rb = QRadioButton(label)
             rb.setProperty("filter_key", key)
@@ -94,7 +97,7 @@ class FilterSelector(QWidget):
     def _update_highlight(self) -> None:
         for key, rb in self._buttons.items():
             if rb.isChecked():
-                rb.setStyleSheet("background-color: #2a3a4a; border-radius: 3px;")
+                rb.setStyleSheet("background-color: #2a3a4a; border-radius: 2px;")
             else:
                 rb.setStyleSheet("")
 

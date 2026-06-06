@@ -1,28 +1,71 @@
 # ── Camera Identity ──────────────────────────────────────────────
+# Each camera entry needs an 'sdk' field for auto-detection routing.
+# Supported SDKs: vimbax, pylon, uvc, optris, simulated
+# Serial numbers are used to match discovered hardware.
+# For UVC devices, use 'device_index' instead of serial.
 cameras:
   allied_vision:
+    sdk: vimbax
     serial: "ALLIED_VISION_SERIAL_HERE"
-    role: overview
+    role: top_dilatometer
+    expected_model: "Alvium 1800 U-812 UV or IMX487 equivalent"
+    sensor: "Sony IMX487"
+    sensor_size_px: [2848, 2848]
+    pixel_pitch_um: 2.74
     default_pixel_format: Mono12
     default_exposure_us: 500
     default_gain_db: 0.0
-    lens: "78mm f/3.8"
-    working_distance_mm: 600
-    fov_mm: [52, 52]
+    default_filter: "470nm_bandpass"
+    lens: "0.16X SilverTL-class telecentric"
+    working_distance_mm: 177
+    fov_mm: [48.6, 48.6]
+    optical_axis: z
+    measures_projection: x-y
   basler:
-    serial: "BASLER_SERIAL_HERE"
-    role: closeup_filtered
+    sdk: pylon
+    serial: "40775503"
+    role: front_dilatometer
+    expected_model: "a2A2840-48umUV"
+    sensor: "Sony IMX487"
+    sensor_size_px: [2840, 2840]
+    pixel_pitch_um: 2.74
     default_pixel_format: Mono12
     default_exposure_us: 200
     default_gain_db: 0.0
-    default_filter: "no_filter"
-    lens: "25mm f/2.8"
-    working_distance_mm: 20
-    fov_mm: [54, 54]
+    default_filter: "470nm_bandpass"
+    lens: "0.16X SilverTL-class telecentric"
+    working_distance_mm: 177
+    fov_mm: [48.6, 48.6]
+    optical_axis: y
+    measures_projection: x-z
+  # Uncomment and set device_index when a USB microscope is connected.
+  # Run with --verbose to see which UVC indices are available.
+  # microscope:
+  #   sdk: uvc
+  #   device_index: -1
+  #   role: microscope
+  #   default_pixel_format: Mono8
+  #   default_exposure_us: 10000
+  #   default_gain_db: 0.0
+  #   lens: "built-in"
+  #   working_distance_mm: 10
+  # Uncomment when the Optris PI 640 is connected (Windows only for SDK).
+  # thermal:
+  #   sdk: optris
+  #   serial: ""
+  #   role: thermal
+  #   default_pixel_format: Thermal16
+  #   default_exposure_us: 1000
+  #   default_gain_db: 0.0
+  #   config_xml: ""
+  #   emissivity: 0.95
 
 # ── Recording ────────────────────────────────────────────────────
+# data_root: set to "auto" to use platform-appropriate default
+#   macOS:   ~/flash_data
+#   Windows: D:/flash_data (or ~/flash_data if D: not available)
 recording:
-  data_root: "D:/flash_data"
+  data_root: "auto"
   session_naming: "{date}_{time}_{name}"
   pretrigger_buffer_s: 2.0
   default_quality_preset: "high"
@@ -40,6 +83,50 @@ zmq:
   oes_pub_port: 5555
   camera_pub_port: 5556
   heartbeat_interval_s: 1.0
+
+# ── 3D Wire Dilatometer ─────────────────────────────────────────
+dilatometer:
+  enabled: true
+  mode: wire_silhouette_3d
+  camera_pair:
+    front: basler
+    top: allied_vision
+  coordinate_system:
+    x: "between fixed clips"
+    y: "lateral/front-back"
+    z: "vertical"
+  optics:
+    lens: "0.16X SilverTL-class telecentric"
+    reference_lens: "Edmund Optics #56-675"
+    working_distance_mm: 177.0
+    working_distance_tolerance_mm: 3.0
+    depth_of_field_mm_at_f10: 19.74
+    pixel_size_um: 17.1
+    field_of_view_mm: [48.6, 48.6]
+    high_accuracy_bow_envelope_mm: 10.0
+    quality_flag_bow_envelope_mm: 20.0
+  illumination:
+    wavelength_nm: 470
+    geometry: "strobed backlight silhouette"
+    filter: "470 nm bandpass OD4+"
+    secondary_modes:
+      - "405 nm near-UV"
+      - "365 nm UV with quartz optics"
+  calibration:
+    calibration_file: ""
+    target: "dot-grid or ChArUco at specimen plane"
+    requires_3d_or_depth_sweep: true
+    scale_validation: "gauge pin or known-diameter wire"
+  quality_control:
+    min_edge_contrast:
+    max_saturation_fraction:
+    store_edge_confidence: true
+    store_fiducial_reprojection_error: true
+  balluffi:
+    default_material: Pt
+    default_cte_strain_to_1000k: 0.009
+    dilute_warning_fraction: 0.02
+    label_without_lattice_data: "apparent defect swelling"
 
 # ── Display ──────────────────────────────────────────────────────
 display:

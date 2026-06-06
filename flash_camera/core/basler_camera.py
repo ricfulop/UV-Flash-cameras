@@ -150,15 +150,37 @@ class BaslerCamera(CameraInterface):
         logger.info("Acquisition stopped (dropped=%d)", self._dropped_count)
 
     def _grab_loop(self) -> None:
+        consecutive_failures = 0
         while not self._stop_event.is_set():
+            if not self._cam.IsGrabbing():
+                if self._stop_event.is_set():
+                    break
+                logger.warning("Basler camera stopped grabbing — restarting")
+                try:
+                    self._cam.StopGrabbing()
+                except Exception:
+                    pass
+                try:
+                    self._cam.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+                    consecutive_failures = 0
+                except Exception:
+                    logger.exception("Failed to restart grabbing")
+                    self._stop_event.wait(1.0)
+                    continue
+
             try:
                 grab_result = self._cam.RetrieveResult(
-                    500, pylon.TimeoutHandling_Return
+                    1000, pylon.TimeoutHandling_Return
                 )
             except Exception:
                 if self._stop_event.is_set():
                     break
-                logger.warning("Grab error", exc_info=True)
+                consecutive_failures += 1
+                logger.warning("Grab error (consecutive=%d)", consecutive_failures)
+                if consecutive_failures > 10:
+                    logger.error("Too many grab failures — pausing 2s")
+                    self._stop_event.wait(2.0)
+                    consecutive_failures = 0
                 continue
 
             if grab_result is None:
@@ -166,9 +188,14 @@ class BaslerCamera(CameraInterface):
 
             try:
                 if grab_result.GrabSucceeded():
+                    consecutive_failures = 0
                     arr = grab_result.GetArray().copy()
+                    try:
+                        ts = grab_result.TimeStamp
+                    except Exception:
+                        ts = time.time_ns()
                     meta = FrameMetadata(
-                        timestamp_ns=grab_result.TimeStamp if hasattr(grab_result, "TimeStamp") else time.time_ns(),
+                        timestamp_ns=ts,
                         frame_id=self._frame_id,
                         exposure_us=self._exposure_us,
                         gain_db=self._gain_db,
@@ -211,20 +238,30 @@ class BaslerCamera(CameraInterface):
     def set_exposure(self, us: float) -> None:
         if self._cam is None:
             raise RuntimeError("Camera is not open")
-        try:
-            self._cam.ExposureTime.SetValue(us)
-        except Exception:
-            self._cam.ExposureTimeAbs.SetValue(us)
+        with self._lock:
+            try:
+                self._cam.ExposureTime.SetValue(us)
+            except Exception:
+                try:
+                    self._cam.ExposureTimeAbs.SetValue(us)
+                except Exception:
+                    logger.warning("Failed to set exposure to %.1f µs", us)
+                    return
         self._exposure_us = us
         logger.debug("Exposure set to %.1f µs", us)
 
     def set_gain(self, db: float) -> None:
         if self._cam is None:
             raise RuntimeError("Camera is not open")
-        try:
-            self._cam.Gain.SetValue(db)
-        except Exception:
-            self._cam.GainRaw.SetValue(int(db))
+        with self._lock:
+            try:
+                self._cam.Gain.SetValue(db)
+            except Exception:
+                try:
+                    self._cam.GainRaw.SetValue(int(db))
+                except Exception:
+                    logger.warning("Failed to set gain to %.1f dB", db)
+                    return
         self._gain_db = db
         logger.debug("Gain set to %.1f dB", db)
 

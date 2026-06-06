@@ -117,6 +117,111 @@ def create_montage(session_dir: str, frame_index: int = 0, output: str | None = 
     return montage
 
 
+def compute_wire_metrics(
+    session_dir: str,
+    *,
+    front_camera: str | None = None,
+    top_camera: str | None = None,
+    frame_index: int = 0,
+    output: str | None = None,
+) -> dict:
+    """Compute 3D wire tube metrics for one synchronized frame pair."""
+
+    import json
+    import tifffile
+    from flash_camera.analysis.wire_silhouette import analyze_stereo_pair
+
+    session = Path(session_dir)
+    metadata = _load_session(session_dir)
+    dil = metadata.get("dilatometer", {})
+    pair = dil.get("camera_pair", {})
+    optics = dil.get("optics", {})
+    front_id = front_camera or pair.get("front")
+    top_id = top_camera or pair.get("top")
+    if not front_id or not top_id:
+        raise ValueError("front_camera and top_camera are required")
+
+    front_files = _list_tiffs(session / front_id)
+    top_files = _list_tiffs(session / top_id)
+    if frame_index >= len(front_files) or frame_index >= len(top_files):
+        raise IndexError("frame_index is outside available stereo frame range")
+
+    pixel_size_um = float(optics.get("pixel_size_um", 17.1))
+    front_frame = tifffile.imread(str(front_files[frame_index]))
+    top_frame = tifffile.imread(str(top_files[frame_index]))
+    model = analyze_stereo_pair(
+        front_frame,
+        top_frame,
+        pixel_size_um=pixel_size_um,
+    )
+    result = {
+        "session_dir": str(session),
+        "front_camera": front_id,
+        "top_camera": top_id,
+        "frame_index": frame_index,
+        "pixel_size_um": pixel_size_um,
+        "wire_model": model.to_dict(),
+    }
+    if output:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        with open(output, "w") as f:
+            json.dump(result, f, indent=2)
+    return result
+
+
+def compute_balluffi_result(
+    *,
+    macro_strain: float | None = None,
+    initial_length_mm: float | None = None,
+    current_length_mm: float | None = None,
+    lattice_strain: float | None = None,
+    cte_strain: float | None = None,
+    output: str | None = None,
+) -> dict:
+    """Compute Balluffi-style apparent defect swelling."""
+
+    import json
+    from flash_camera.analysis.balluffi import calculate_balluffi, calculate_from_lengths
+
+    if macro_strain is None:
+        if initial_length_mm is None or current_length_mm is None:
+            raise ValueError("Provide macro_strain or both initial_length_mm and current_length_mm")
+        result = calculate_from_lengths(
+            initial_length_mm,
+            current_length_mm,
+            epsilon_lattice=lattice_strain,
+            epsilon_cte=cte_strain,
+        ).to_dict()
+    else:
+        result = calculate_balluffi(
+            macro_strain,
+            epsilon_lattice=lattice_strain,
+            epsilon_cte=cte_strain,
+        ).to_dict()
+    if output:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        with open(output, "w") as f:
+            json.dump(result, f, indent=2)
+    return result
+
+
+def get_dic_backend_status(output: str | None = None) -> dict:
+    """Return availability of primary and optional DIC/metrology backends."""
+
+    import json
+    from flash_camera.analysis.dic_backends import backend_status, primary_backend_name
+
+    result = {
+        "primary_backend": primary_backend_name(),
+        "backends": backend_status(),
+    }
+    if output:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        with open(output, "w") as f:
+            json.dump(result, f, indent=2)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Flash Camera Session Export Utility")
     sub = parser.add_subparsers(dest="command")
@@ -136,6 +241,24 @@ def main():
     mont.add_argument("--frame", "-f", type=int, default=0)
     mont.add_argument("--output", "-o", default=None)
 
+    wire = sub.add_parser("wire-metrics", help="Compute 3D wire metrics from a front/top frame pair")
+    wire.add_argument("session_dir")
+    wire.add_argument("--front-camera", default=None)
+    wire.add_argument("--top-camera", default=None)
+    wire.add_argument("--frame", "-f", type=int, default=0)
+    wire.add_argument("--output", "-o", default=None)
+
+    balluffi = sub.add_parser("balluffi", help="Compute Balluffi-style apparent defect swelling")
+    balluffi.add_argument("--macro-strain", type=float, default=None)
+    balluffi.add_argument("--initial-length-mm", type=float, default=None)
+    balluffi.add_argument("--current-length-mm", type=float, default=None)
+    balluffi.add_argument("--lattice-strain", type=float, default=None)
+    balluffi.add_argument("--cte-strain", type=float, default=None)
+    balluffi.add_argument("--output", "-o", default=None)
+
+    backends = sub.add_parser("dic-backends", help="Show DIC/metrology backend availability")
+    backends.add_argument("--output", "-o", default=None)
+
     info = sub.add_parser("info", help="Show session metadata")
     info.add_argument("session_dir")
 
@@ -154,6 +277,34 @@ def main():
 
     elif args.command == "montage":
         create_montage(args.session_dir, args.frame, args.output)
+
+    elif args.command == "wire-metrics":
+        import json
+        result = compute_wire_metrics(
+            args.session_dir,
+            front_camera=args.front_camera,
+            top_camera=args.top_camera,
+            frame_index=args.frame,
+            output=args.output,
+        )
+        print(json.dumps(result, indent=2))
+
+    elif args.command == "balluffi":
+        import json
+        result = compute_balluffi_result(
+            macro_strain=args.macro_strain,
+            initial_length_mm=args.initial_length_mm,
+            current_length_mm=args.current_length_mm,
+            lattice_strain=args.lattice_strain,
+            cte_strain=args.cte_strain,
+            output=args.output,
+        )
+        print(json.dumps(result, indent=2))
+
+    elif args.command == "dic-backends":
+        import json
+        result = get_dic_backend_status(output=args.output)
+        print(json.dumps(result, indent=2))
 
     elif args.command == "info":
         import json

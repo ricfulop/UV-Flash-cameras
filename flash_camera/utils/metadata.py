@@ -19,6 +19,7 @@ def create_session_metadata(
     oes_sync: dict | None,
     file_paths: dict,
     *,
+    dilatometer: dict | None = None,
     start_time_utc: str | None = None,
     duration_s: float = 0.0,
 ) -> dict:
@@ -41,6 +42,7 @@ def create_session_metadata(
         "cameras": cameras_info,
         "reactor_conditions": reactor_conditions,
         "oes_sync": oes_sync or {},
+        "dilatometer": dilatometer or {},
         "file_paths": file_paths,
     }
 

@@ -8,6 +8,8 @@ __all__ = [
     "AlliedVisionCamera",
     "BaslerCamera",
     "SimulatedCamera",
+    "UVCCamera",
+    "OptrisCamera",
 ]
 
 
@@ -26,4 +28,16 @@ def BaslerCamera(*args, **kwargs):
 def SimulatedCamera(*args, **kwargs):
     """Lazy import — always available (numpy only)."""
     from flash_camera.core.simulated_camera import SimulatedCamera as _Cls
+    return _Cls(*args, **kwargs)
+
+
+def UVCCamera(*args, **kwargs):
+    """Lazy import — requires OpenCV."""
+    from flash_camera.core.uvc_camera import UVCCamera as _Cls
+    return _Cls(*args, **kwargs)
+
+
+def OptrisCamera(*args, **kwargs):
+    """Lazy import — requires pyoptris (Windows) or runs simulated."""
+    from flash_camera.core.optris_camera import OptrisCamera as _Cls
     return _Cls(*args, **kwargs)

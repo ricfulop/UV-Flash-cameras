@@ -16,10 +16,12 @@ QWidget {
 QCheckBox {
     spacing: 4px;
     color: #cccccc;
+    font-size: 11px;
+    padding: 2px 4px;
 }
 QCheckBox::indicator {
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
     border: 1px solid #555555;
     border-radius: 2px;
     background-color: #2a2a2a;
@@ -34,19 +36,19 @@ QComboBox {
     border: 1px solid #555555;
     border-radius: 2px;
     padding: 2px 18px 2px 6px;
-    min-width: 80px;
+    min-width: 70px;
+    font-size: 11px;
 }
 QComboBox::drop-down {
     border: none;
+    width: 16px;
 }
 QComboBox QAbstractItemView {
     background-color: #2a2a2a;
     color: #cccccc;
     selection-background-color: #4a90d9;
-}
-QLabel {
-    color: #888888;
-    font-size: 10px;
+    selection-color: #ffffff;
+    border: 1px solid #555555;
 }
 """
 
@@ -61,11 +63,10 @@ class OverlayControls(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(_STYLE)
-        self.setFixedHeight(32)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 2, 6, 2)
-        layout.setSpacing(10)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(12)
 
         self._cb_crosshair = QCheckBox("Crosshair")
         self._cb_crosshair.setChecked(True)
@@ -83,7 +84,8 @@ class OverlayControls(QWidget):
         self._cb_histogram.setChecked(True)
         self._cb_histogram.toggled.connect(self.histogram_toggled)
 
-        self._lbl_cmap = QLabel("Colormap:")
+        lbl = QLabel("Colormap:")
+        lbl.setStyleSheet("color: #888888; font-size: 11px;")
         self._combo_cmap = QComboBox()
         self._combo_cmap.addItems(["gray", "inferno", "viridis", "plasma"])
         self._combo_cmap.currentTextChanged.connect(self.colormap_changed)
@@ -92,6 +94,6 @@ class OverlayControls(QWidget):
         layout.addWidget(self._cb_scale_bar)
         layout.addWidget(self._cb_info)
         layout.addWidget(self._cb_histogram)
-        layout.addWidget(self._lbl_cmap)
+        layout.addWidget(lbl)
         layout.addWidget(self._combo_cmap)
         layout.addStretch()

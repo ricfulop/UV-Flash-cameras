@@ -17,8 +17,9 @@ _DISPLAY_BINS = 256
 class HistogramWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(90)
-        self.setMinimumWidth(200)
+        self.setMinimumHeight(40)
+        self.setMaximumHeight(90)
+        self.setMinimumWidth(100)
 
         self._counts: np.ndarray | None = None
         self._bin_edges: np.ndarray | None = None

@@ -1,13 +1,19 @@
-"""Camera discovery, lifecycle management, and frame distribution."""
+"""Camera discovery, lifecycle management, and frame distribution.
+
+Supports auto-detection across all available SDKs:
+- Allied Vision (VmbPy / Vimba X)
+- Basler (pypylon / Pylon)
+- UVC (OpenCV — USB microscopes, webcams)
+- Optris (pyoptris / libirimager — thermal cameras)
+- Simulated (numpy — always available for testing)
+"""
 
 import logging
 import threading
 import time
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import yaml
 
 from flash_camera.core.camera_interface import CameraInterface, FrameMetadata
 from flash_camera.core.frame_buffer import FrameRingBuffer
@@ -15,18 +21,22 @@ from flash_camera.core.quality_presets import dtype_for_bit_depth
 
 logger = logging.getLogger(__name__)
 
-_CAMERA_ROLES = {
-    "allied_vision": "overview",
-    "basler": "closeup_filtered",
+SDK_ROLE_HINTS = {
+    "vimbax": "overview",
+    "pylon": "closeup_filtered",
+    "uvc": "microscope",
+    "optris": "thermal",
+    "simulated": "simulated",
 }
 
 
 class CameraSlot:
-    """Manages one camera's lifecycle: discovery, acquisition thread, ring buffer."""
+    """Manages one camera's lifecycle: acquisition thread, ring buffer."""
 
-    def __init__(self, camera_id: str, role: str, config: dict):
+    def __init__(self, camera_id: str, role: str, sdk: str, config: dict):
         self.camera_id = camera_id
         self.role = role
+        self.sdk = sdk
         self.config = config
         self.camera: Optional[CameraInterface] = None
         self.connected = False
@@ -44,12 +54,11 @@ class CameraSlot:
         self._dropped_count = 0
 
     def set_frame_callback(self, callback):
-        """Set callback(camera_id, frame, metadata) invoked on each new frame."""
         self._frame_callback = callback
 
     def init_ring_buffer(self, duration_s: float, max_fps: float, bit_depth: str):
         dtype = dtype_for_bit_depth(bit_depth).type
-        w, h = 3840, 2160
+        w, h = 640, 480
         if self.camera is not None:
             try:
                 w, h = self.camera.get_sensor_size()
@@ -133,6 +142,70 @@ class CameraSlot:
         return self._dropped_count
 
 
+def _enumerate_vimbax() -> list[dict]:
+    """Enumerate Allied Vision cameras via Vimba X SDK."""
+    try:
+        import vmbpy
+        with vmbpy.VmbSystem.get_instance() as vmb:
+            cams = vmb.get_all_cameras()
+            results = []
+            for cam in cams:
+                results.append({
+                    "serial": cam.get_id(),
+                    "model": cam.get_model(),
+                    "sdk": "vimbax",
+                    "interface": "USB3",
+                })
+            return results
+    except ImportError:
+        logger.debug("VmbPy not installed — skipping Allied Vision enumeration")
+    except Exception:
+        logger.debug("Vimba X enumeration failed", exc_info=True)
+    return []
+
+
+def _enumerate_pylon() -> list[dict]:
+    """Enumerate Basler cameras via Pylon SDK."""
+    try:
+        from pypylon import pylon
+        tlf = pylon.TlFactory.GetInstance()
+        devices = tlf.EnumerateDevices()
+        results = []
+        for dev in devices:
+            results.append({
+                "serial": dev.GetSerialNumber(),
+                "model": dev.GetModelName(),
+                "sdk": "pylon",
+                "interface": dev.GetDeviceClass(),
+            })
+        return results
+    except ImportError:
+        logger.debug("pypylon not installed — skipping Basler enumeration")
+    except Exception:
+        logger.debug("Pylon enumeration failed", exc_info=True)
+    return []
+
+
+def _enumerate_uvc() -> list[dict]:
+    """Enumerate UVC (USB webcam/microscope) devices via OpenCV."""
+    try:
+        from flash_camera.core.uvc_camera import enumerate_uvc_devices
+        return enumerate_uvc_devices()
+    except Exception:
+        logger.debug("UVC enumeration failed", exc_info=True)
+    return []
+
+
+def _enumerate_optris() -> list[dict]:
+    """Enumerate Optris thermal cameras."""
+    try:
+        from flash_camera.core.optris_camera import enumerate_optris_devices
+        return enumerate_optris_devices()
+    except Exception:
+        logger.debug("Optris enumeration failed", exc_info=True)
+    return []
+
+
 class CameraManager:
     """Manages discovery and lifecycle of all cameras."""
 
@@ -146,81 +219,219 @@ class CameraManager:
         return self._slots
 
     def discover_cameras(self, use_simulated: bool = False) -> list[str]:
-        """Discover cameras. If use_simulated=True, create simulated cameras."""
+        """Auto-discover cameras across all SDKs, or use simulated if requested."""
         self._use_simulated = use_simulated
         found = []
         cam_configs = self._config.get("cameras", {})
 
         if use_simulated:
             for cam_id, cam_cfg in cam_configs.items():
-                role = cam_cfg.get("role", _CAMERA_ROLES.get(cam_id, "unknown"))
-                slot = CameraSlot(cam_id, role, cam_cfg)
+                sdk = cam_cfg.get("sdk", "simulated")
+                role = cam_cfg.get("role", SDK_ROLE_HINTS.get(sdk, "unknown"))
+                slot = CameraSlot(cam_id, role, sdk, cam_cfg)
                 self._slots[cam_id] = slot
                 self._connect_simulated(slot, cam_cfg)
                 found.append(cam_id)
             return found
 
+        # --- Hardware mode: only show cameras that are physically present ---
+        logger.info("Scanning for connected cameras...")
+        hw_devices = self._scan_all_hardware()
+
+        if not hw_devices:
+            logger.warning("No cameras detected on any transport layer")
+            return found
+
+        matched_hw_indices = set()
+
+        # Pass 1: match config entries to discovered hardware by serial or device_index
         for cam_id, cam_cfg in cam_configs.items():
-            role = cam_cfg.get("role", _CAMERA_ROLES.get(cam_id, "unknown"))
-            slot = CameraSlot(cam_id, role, cam_cfg)
+            sdk = cam_cfg.get("sdk", "")
+            serial = cam_cfg.get("serial", "")
+            role = cam_cfg.get("role", SDK_ROLE_HINTS.get(sdk, "unknown"))
+
+            if serial and "SERIAL_HERE" not in serial:
+                for i, hw_dev in enumerate(hw_devices):
+                    if i in matched_hw_indices:
+                        continue
+                    if hw_dev.get("serial") == serial:
+                        slot = CameraSlot(cam_id, role, hw_dev["sdk"], cam_cfg)
+                        self._slots[cam_id] = slot
+                        try:
+                            self._connect_hardware(slot, hw_dev, cam_cfg)
+                            matched_hw_indices.add(i)
+                            found.append(cam_id)
+                            logger.info("Config camera '%s' matched to %s (serial=%s)",
+                                        cam_id, hw_dev.get("model", "?"), serial)
+                        except Exception:
+                            logger.exception("Failed to connect config camera %s", cam_id)
+                        break
+
+            elif sdk == "uvc":
+                dev_idx = cam_cfg.get("device_index", -1)
+                if dev_idx >= 0:
+                    for i, hw_dev in enumerate(hw_devices):
+                        if i in matched_hw_indices:
+                            continue
+                        if hw_dev.get("sdk") == "uvc" and hw_dev.get("device_index") == dev_idx:
+                            slot = CameraSlot(cam_id, role, "uvc", cam_cfg)
+                            self._slots[cam_id] = slot
+                            try:
+                                self._connect_uvc(slot, dev_idx, cam_cfg)
+                                matched_hw_indices.add(i)
+                                found.append(cam_id)
+                                logger.info("Config camera '%s' matched to UVC device %d", cam_id, dev_idx)
+                            except Exception:
+                                logger.exception("Failed to connect UVC device %d", dev_idx)
+                            break
+
+        # Pass 2: auto-add unmatched hardware from proprietary SDKs only.
+        # UVC/Optris devices are NOT auto-added — they could be webcams, phones,
+        # etc. Only explicitly configured UVC devices get connected.
+        for i, hw_dev in enumerate(hw_devices):
+            if i in matched_hw_indices:
+                continue
+
+            hw_sdk = hw_dev.get("sdk", "")
+            if hw_sdk in ("uvc", "optris"):
+                logger.debug("Skipping auto-discovery of %s device (must be in config)", hw_sdk)
+                continue
+
+            hw_serial = hw_dev.get("serial", "")
+            hw_model = hw_dev.get("model", "")
+            cam_id = f"{hw_sdk}_{hw_serial}" if hw_serial else f"{hw_sdk}_{i}"
+            display_name = hw_model or cam_id
+
+            if cam_id in self._slots:
+                continue
+
+            role = SDK_ROLE_HINTS.get(hw_sdk, "unknown")
+            slot = CameraSlot(cam_id, role, hw_sdk, {})
             self._slots[cam_id] = slot
 
-            serial = cam_cfg.get("serial", "")
-            if serial and "SERIAL_HERE" not in serial:
-                try:
-                    self._connect_hardware(slot, cam_id, serial, cam_cfg)
-                    found.append(cam_id)
-                except Exception:
-                    logger.exception("Failed to connect %s (serial=%s)", cam_id, serial)
-            else:
-                logger.info("No valid serial for %s — using simulated", cam_id)
-                self._connect_simulated(slot, cam_cfg)
+            try:
+                self._connect_hardware(slot, hw_dev, {})
                 found.append(cam_id)
+                logger.info("Auto-discovered: %s — %s (%s)", cam_id, display_name, hw_sdk)
+            except Exception:
+                logger.exception("Failed to auto-connect %s", cam_id)
 
         return found
 
-    def _connect_hardware(self, slot: CameraSlot, cam_id: str, serial: str, cfg: dict):
-        if cam_id == "allied_vision":
-            from flash_camera.core.allied_vision_camera import AlliedVisionCamera
-            cam = AlliedVisionCamera(serial=serial)
-        elif cam_id == "basler":
-            from flash_camera.core.basler_camera import BaslerCamera
-            cam = BaslerCamera(serial=serial)
+    def _scan_all_hardware(self) -> list[dict]:
+        cam_configs = self._config.get("cameras", {})
+        configured_sdks = {cfg.get("sdk", "") for cfg in cam_configs.values()}
+
+        devices = []
+        devices.extend(_enumerate_vimbax())
+        devices.extend(_enumerate_pylon())
+
+        if "uvc" in configured_sdks:
+            devices.extend(_enumerate_uvc())
         else:
-            raise ValueError(f"Unknown camera type: {cam_id}")
+            logger.debug("Skipping UVC scan — no UVC cameras in config")
+
+        if "optris" in configured_sdks:
+            devices.extend(_enumerate_optris())
+        else:
+            logger.debug("Skipping Optris scan — no Optris cameras in config")
+
+        logger.info("Hardware scan found %d device(s): %s",
+                     len(devices),
+                     [(d.get("sdk"), d.get("serial", d.get("device_index", "?"))) for d in devices])
+        return devices
+
+    def _find_hw_device(self, devices: list[dict], serial: str, sdk: str) -> Optional[dict]:
+        for dev in devices:
+            dev_serial = dev.get("serial", "")
+            dev_sdk = dev.get("sdk", "")
+            if dev_serial == serial:
+                return dev
+            if sdk and dev_sdk == sdk and dev_serial == serial:
+                return dev
+        return None
+
+    def _connect_hardware(self, slot: CameraSlot, hw_dev: dict, cfg: dict):
+        sdk = hw_dev.get("sdk", "")
+        serial = hw_dev.get("serial", "")
+
+        if sdk == "vimbax":
+            from flash_camera.core.allied_vision_camera import AlliedVisionCamera
+            cam = AlliedVisionCamera(device_id=serial)
+        elif sdk == "pylon":
+            from flash_camera.core.basler_camera import BaslerCamera
+            cam = BaslerCamera(serial_number=serial)
+        elif sdk == "uvc":
+            from flash_camera.core.uvc_camera import UVCCamera
+            dev_idx = hw_dev.get("device_index", 0)
+            cam = UVCCamera(device_index=dev_idx, camera_id=slot.camera_id)
+        elif sdk == "optris":
+            from flash_camera.core.optris_camera import OptrisCamera
+            cam = OptrisCamera(serial=serial, camera_id=slot.camera_id)
+        else:
+            raise ValueError(f"Unknown SDK: {sdk}")
 
         cam.open()
         self._apply_defaults(cam, cfg)
         slot.camera = cam
         slot.connected = True
-        logger.info("Hardware camera %s connected (serial=%s)", cam_id, serial)
+        slot.sdk = sdk
+        logger.info("Hardware camera %s connected (sdk=%s, serial=%s)", slot.camera_id, sdk, serial)
+
+    def _connect_uvc(self, slot: CameraSlot, device_index: int, cfg: dict):
+        from flash_camera.core.uvc_camera import UVCCamera
+        cam = UVCCamera(device_index=device_index, camera_id=slot.camera_id)
+        cam.open()
+        self._apply_defaults(cam, cfg)
+        slot.camera = cam
+        slot.connected = True
+        slot.sdk = "uvc"
+        logger.info("UVC camera %s connected (index=%d)", slot.camera_id, device_index)
+
+    def _connect_optris(self, slot: CameraSlot, serial: str, cfg: dict):
+        from flash_camera.core.optris_camera import OptrisCamera
+        config_xml = cfg.get("config_xml", "")
+        cam = OptrisCamera(serial=serial, camera_id=slot.camera_id, config_xml=config_xml)
+        cam.open()
+        self._apply_defaults(cam, cfg)
+        slot.camera = cam
+        slot.connected = True
+        slot.sdk = "optris"
+        logger.info("Optris camera %s connected", slot.camera_id)
 
     def _connect_simulated(self, slot: CameraSlot, cfg: dict):
         from flash_camera.core.simulated_camera import SimulatedCamera
-        cam = SimulatedCamera(camera_id=slot.camera_id, frame_rate=30.0)
+        w = cfg.get("simulated_width", 640)
+        h = cfg.get("simulated_height", 480)
+        cam = SimulatedCamera(
+            width=w, height=h,
+            camera_id=slot.camera_id,
+            frame_rate=cfg.get("simulated_fps", 30.0),
+        )
         cam.open()
         self._apply_defaults(cam, cfg)
         slot.camera = cam
         slot.connected = True
+        slot.sdk = "simulated"
         logger.info("Simulated camera %s connected", slot.camera_id)
 
     def _apply_defaults(self, cam: CameraInterface, cfg: dict):
         try:
-            fmt = cfg.get("default_pixel_format", "Mono8")
-            if fmt in cam.get_pixel_formats():
+            fmt = cfg.get("default_pixel_format", "")
+            if fmt and fmt in cam.get_pixel_formats():
                 cam.set_pixel_format(fmt)
         except Exception:
             logger.warning("Could not set default pixel format")
-
         try:
-            exp = cfg.get("default_exposure_us", 500)
-            cam.set_exposure(float(exp))
+            exp = cfg.get("default_exposure_us")
+            if exp is not None:
+                cam.set_exposure(float(exp))
         except Exception:
             logger.warning("Could not set default exposure")
-
         try:
-            gain = cfg.get("default_gain_db", 0.0)
-            cam.set_gain(float(gain))
+            gain = cfg.get("default_gain_db")
+            if gain is not None:
+                cam.set_gain(float(gain))
         except Exception:
             logger.warning("Could not set default gain")
 
